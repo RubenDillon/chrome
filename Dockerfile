@@ -8,7 +8,7 @@ LABEL description="Chrome kiosk container - YouTube playlist continuous playback
 # AlmaLinux 9 has full X11/desktop repos without subscription
 # -------------------------------------------------------
 RUN dnf install -y epel-release \
-    && dnf install -y \
+    && dnf install -y --allowerasing \
         xorg-x11-server-Xvfb \
         xorg-x11-utils \
         xdotool \
