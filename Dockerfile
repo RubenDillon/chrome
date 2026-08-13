@@ -1,13 +1,13 @@
-FROM registry.access.redhat.com/ubi9/ubi:latest
+FROM almalinux:9
 
 LABEL maintainer="RubenDillon"
 LABEL description="Chrome kiosk container - YouTube playlist continuous playback"
 
 # -------------------------------------------------------
 # Install EPEL + required packages
+# AlmaLinux 9 has full X11/desktop repos without subscription
 # -------------------------------------------------------
-RUN dnf install -y \
-        https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm \
+RUN dnf install -y epel-release \
     && dnf install -y \
         xorg-x11-server-Xvfb \
         xorg-x11-utils \
@@ -60,25 +60,52 @@ RUN pip3 install --no-cache-dir \
 # -------------------------------------------------------
 # Install ChromeDriver matching installed Chrome version
 # -------------------------------------------------------
-RUN CHROME_VERSION=$(google-chrome --version | awk '{print $3}' | cut -d. -f1) \
-    && DRIVER_URL="https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json" \
-    && DRIVER_VER=$(curl -s "$DRIVER_URL" \
-        | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-major = '${CHROME_VERSION}'
-versions = [v for v in data['versions'] if v['version'].startswith(major + '.')]
-versions.sort(key=lambda x: x['version'], reverse=True)
-if versions:
-    for dl in versions[0]['downloads'].get('chromedriver', []):
-        if dl['platform'] == 'linux64':
-            print(dl['url'])
+RUN python3 - <<'PYEOF'
+import subprocess, urllib.request, json, sys, os, zipfile, io
+
+# Get Chrome major version
+out = subprocess.check_output(["google-chrome", "--version"], stderr=subprocess.DEVNULL).decode()
+major = out.strip().split()[-1].split(".")[0]
+print(f"Chrome major version: {major}")
+
+# Fetch known-good versions JSON
+url = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+with urllib.request.urlopen(url) as r:
+    data = json.load(r)
+
+# Find latest chromedriver for this major version
+versions = [v for v in data["versions"] if v["version"].split(".")[0] == major]
+versions.sort(key=lambda x: list(map(int, x["version"].split("."))), reverse=True)
+
+driver_url = None
+for v in versions:
+    for dl in v["downloads"].get("chromedriver", []):
+        if dl["platform"] == "linux64":
+            driver_url = dl["url"]
             break
-") \
-    && wget -q -O /tmp/chromedriver.zip "$DRIVER_VER" \
-    && unzip -j /tmp/chromedriver.zip '*/chromedriver' -d /usr/local/bin/ \
-    && chmod +x /usr/local/bin/chromedriver \
-    && rm -f /tmp/chromedriver.zip
+    if driver_url:
+        break
+
+if not driver_url:
+    print(f"ERROR: no chromedriver found for Chrome {major}", file=sys.stderr)
+    sys.exit(1)
+
+print(f"Downloading chromedriver from: {driver_url}")
+with urllib.request.urlopen(driver_url) as r:
+    zdata = r.read()
+
+with zipfile.ZipFile(io.BytesIO(zdata)) as z:
+    for name in z.namelist():
+        if name.endswith("chromedriver") and not name.endswith("/"):
+            data_bytes = z.read(name)
+            out_path = "/usr/local/bin/chromedriver"
+            with open(out_path, "wb") as f:
+                f.write(data_bytes)
+            os.chmod(out_path, 0o755)
+            print(f"Installed chromedriver to {out_path}")
+            break
+PYEOF
+RUN chromedriver --version
 
 # -------------------------------------------------------
 # Create non-root user for Chrome
