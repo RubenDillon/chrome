@@ -1,21 +1,25 @@
-import os, time
+import os, time, shutil
 os.environ['DISPLAY'] = ':99'
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.chrome.service import Service
-from selenium.webdriver.common.by import By
+import undetected_chromedriver as uc
 
-options = Options()
-for arg in ['--no-sandbox','--disable-setuid-sandbox','--single-process',
-            '--no-zygote','--disable-gpu','--use-gl=swiftshader',
-            '--disable-vulkan','--disable-dev-shm-usage','--mute-audio',
-            '--window-size=1920,1080','--autoplay-policy=no-user-gesture-required']:
+uc_driver = '/tmp/chromedriver_uc'
+if not os.path.exists(uc_driver):
+    shutil.copy2('/usr/local/bin/chromedriver', uc_driver)
+    os.chmod(uc_driver, 0o755)
+
+options = uc.ChromeOptions()
+for arg in ['--no-sandbox','--disable-setuid-sandbox','--disable-namespace-sandbox',
+            '--disable-gpu','--disable-gpu-compositing','--use-gl=swiftshader',
+            '--use-angle=swiftshader-webgl','--disable-vulkan','--disable-dev-shm-usage',
+            '--autoplay-policy=no-user-gesture-required','--window-size=1920,1080',
+            '--disable-infobars','--disable-notifications']:
     options.add_argument(arg)
-options.add_experimental_option('excludeSwitches', ['enable-automation'])
 
-driver = webdriver.Chrome(
-    service=Service('/usr/local/bin/chromedriver', log_path='/tmp/cd.log'),
-    options=options
+driver = uc.Chrome(
+    options=options,
+    driver_executable_path=uc_driver,
+    version_main=None,
+    headless=True,
 )
 driver.get('https://www.youtube.com/watch?v=mPXA2P1x4Xo&autoplay=1')
 time.sleep(12)
