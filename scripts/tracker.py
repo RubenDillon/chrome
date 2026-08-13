@@ -2,14 +2,17 @@
 """
 tracker.py
 ==========
-1. Fetches the YouTube playlist video list with yt-dlp.
-2. Opens each video in Chrome (kiosk mode via Selenium) and waits for it to finish.
-3. Writes a timestamped STARTED entry when playback begins.
-4. Writes a timestamped PLAYED/INCOMPLETE entry when playback ends.
-5. Loops the playlist indefinitely.
+Strategy:
+  1. Fetch playlist with yt-dlp (flat, fast).
+  2. For each video, get its duration with yt-dlp.
+  3. Open the video in Chrome (Selenium) and force play via JS.
+  4. Sleep for the video duration + a small buffer.
+  5. Write STARTED at the beginning, PLAYED at the end.
+  6. Loop forever.
 
-Usage (called by entrypoint.sh):
-    python3 tracker.py --playlist <url> --log <path> --display <:N>
+Using duration-based waiting avoids relying on the HTML5 video.ended
+event, which YouTube's SPA often fires late or never when running under
+Selenium with --mute-audio.
 """
 
 import argparse
@@ -36,52 +39,85 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
+# How many extra seconds to wait after the expected duration ends
+BUFFER_SECONDS = 15
+# Fallback duration if yt-dlp cannot determine it (seconds)
+FALLBACK_DURATION = 600
+# How often to log a "still playing" heartbeat (seconds)
+HEARTBEAT_INTERVAL = 30
+
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_playlist_videos(playlist_url: str) -> list:
-    """Return ordered list of {id, url, title} dicts for every video in the playlist."""
-    log.info("Fetching playlist: %s", playlist_url)
-    result = subprocess.run(
-        [
-            "yt-dlp",
-            "--flat-playlist",
-            "--print", "%(id)s\t%(title)s",
-            "--no-warnings",
-            playlist_url,
-        ],
+def run_ytdlp(args_list: list, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        ["yt-dlp"] + args_list,
         capture_output=True,
         text=True,
-        timeout=120,
+        timeout=timeout,
     )
+
+
+def get_playlist_videos(playlist_url: str) -> list:
+    """Return ordered list of {id, url, title, duration} dicts."""
+    log.info("Fetching playlist: %s", playlist_url)
+    result = run_ytdlp([
+        "--flat-playlist",
+        "--print", "%(id)s\t%(title)s\t%(duration)s",
+        "--no-warnings",
+        playlist_url,
+    ])
     if result.returncode != 0:
-        log.error("yt-dlp error: %s", result.stderr.strip())
+        log.error("yt-dlp playlist error: %s", result.stderr.strip())
         return []
 
     videos = []
     for line in result.stdout.strip().splitlines():
-        parts = line.split("\t", 1)
-        if len(parts) == 2:
-            vid_id, title = parts
-            videos.append(
-                {
-                    "id":    vid_id,
-                    "url":   f"https://www.youtube.com/watch?v={vid_id}",
-                    "title": title,
-                }
-            )
+        parts = line.split("\t", 2)
+        if len(parts) < 2:
+            continue
+        vid_id = parts[0]
+        title  = parts[1] if len(parts) > 1 else vid_id
+        try:
+            duration = int(float(parts[2])) if len(parts) > 2 and parts[2] not in ("", "NA", "None") else None
+        except (ValueError, TypeError):
+            duration = None
+        videos.append({
+            "id":       vid_id,
+            "url":      f"https://www.youtube.com/watch?v={vid_id}",
+            "title":    title,
+            "duration": duration,
+        })
+
     log.info("Found %d videos in playlist.", len(videos))
     return videos
 
 
+def get_video_duration(video_url: str) -> int:
+    """Return video duration in seconds via yt-dlp, or FALLBACK_DURATION."""
+    result = run_ytdlp([
+        "--no-playlist",
+        "--print", "%(duration)s",
+        "--no-warnings",
+        video_url,
+    ], timeout=30)
+    if result.returncode == 0:
+        raw = result.stdout.strip()
+        try:
+            return int(float(raw))
+        except (ValueError, TypeError):
+            pass
+    log.warning("Could not get duration for %s — using %ds fallback.", video_url, FALLBACK_DURATION)
+    return FALLBACK_DURATION
+
+
 def build_driver(display: str) -> webdriver.Chrome:
-    """Create a Chrome driver running on the given Xvfb display."""
+    """Build a Chrome WebDriver on the given Xvfb display."""
     os.environ["DISPLAY"] = display
 
     options = Options()
-    options.add_argument("--kiosk")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
@@ -90,27 +126,32 @@ def build_driver(display: str) -> webdriver.Chrome:
     options.add_argument("--disable-extensions")
     options.add_argument("--mute-audio")
     options.add_argument("--window-size=1920,1080")
-    options.add_argument("--start-fullscreen")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--disable-blink-features=AutomationControlled")
-
-    prefs = {
+    # Exclude automation flags that trigger YouTube bot detection
+    options.add_experimental_option("excludeSwitches", ["enable-automation"])
+    options.add_experimental_option("useAutomationExtension", False)
+    options.add_experimental_option("prefs", {
         "credentials_enable_service": False,
         "profile.password_manager_enabled": False,
-    }
-    options.add_experimental_option("prefs", prefs)
+    })
 
     service = Service(executable_path="/usr/local/bin/chromedriver")
     driver = webdriver.Chrome(service=service, options=options)
+    # Hide webdriver flag from JS
+    driver.execute_cdp_cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},
+    )
     return driver
 
 
 def append_log(log_file: str, video: dict, status: str) -> None:
-    """Append a timestamped line to the played log."""
+    """Write a timestamped entry to the log file."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    line = f"[{timestamp}] {status.upper()} | {video['url']} | {video['title']}\n"
+    line = f"[{timestamp}] {status.upper():10s} | {video['url']} | {video['title']}\n"
     try:
         with open(log_file, "a", encoding="utf-8") as fh:
             fh.write(line)
@@ -121,17 +162,17 @@ def append_log(log_file: str, video: dict, status: str) -> None:
 
 
 def dismiss_consent(driver: webdriver.Chrome) -> None:
-    """Best-effort dismiss of YouTube cookie/consent dialogs."""
-    selectors = [
+    """Dismiss YouTube cookie/consent dialogs if present."""
+    xpaths = [
+        '//button[@aria-label="Accept all"]',
         '//button[contains(., "Accept all")]',
         '//button[contains(., "Accept")]',
         '//button[contains(., "Agree")]',
-        '//button[@aria-label="Accept all"]',
+        '//tp-yt-paper-button[contains(., "AGREE")]',
     ]
-    for sel in selectors:
+    for xp in xpaths:
         try:
-            btn = driver.find_element(By.XPATH, sel)
-            btn.click()
+            driver.find_element(By.XPATH, xp).click()
             log.info("Dismissed consent dialog.")
             time.sleep(2)
             return
@@ -139,103 +180,93 @@ def dismiss_consent(driver: webdriver.Chrome) -> None:
             pass
 
 
-def wait_for_video_end(driver: webdriver.Chrome, video: dict, log_file: str) -> bool:
-    """
-    Poll the HTML5 video element until:
-      - ended=true  → return True
-      - error       → return False
-      - no_video for more than NO_VIDEO_TIMEOUT → log INCOMPLETE and return False
-      - global timeout (video length + buffer) → log INCOMPLETE and return False
-
-    Also logs a STARTED entry on first confirmed playback.
-    """
-    NO_VIDEO_TIMEOUT = 60       # seconds to wait for <video> to appear
-    GLOBAL_TIMEOUT   = 4 * 3600 # 4 hours max per video (covers long streams)
-    POLL_INTERVAL    = 5
-
-    js = """
-    var vids = document.querySelectorAll('video');
-    if (vids.length === 0) return 'no_video';
-    var v = vids[0];
-    if (v.error)  return 'error';
-    if (v.ended)  return 'ended';
-    if (v.paused) return 'paused';
-    if (v.currentTime > 0) return 'playing';
-    return 'loading';
-    """
-
-    started_logged = False
-    no_video_since = time.time()
-    deadline = time.time() + GLOBAL_TIMEOUT
-
-    while time.time() < deadline:
-        try:
-            status = driver.execute_script(js)
-        except Exception as exc:
-            log.warning("JS execution error: %s", exc)
-            return False
-
-        log.debug("Video status: %s", status)
-
-        if status == "no_video":
-            if time.time() - no_video_since > NO_VIDEO_TIMEOUT:
-                log.warning("No <video> element found after %ds — skipping.", NO_VIDEO_TIMEOUT)
-                return False
-        else:
-            # Reset the no_video timer whenever we see any video element
-            no_video_since = time.time()
-
-        if status in ("playing", "loading", "paused") and not started_logged:
-            append_log(log_file, video, "started")
-            started_logged = True
-
-        if status == "ended":
-            return True
-
-        if status == "error":
-            log.warning("Video element reported an error — skipping.")
-            return False
-
-        # If paused for too long, try to resume
-        if status == "paused" and started_logged:
-            try:
-                driver.execute_script(
-                    "document.querySelector('video').play();"
-                )
-            except Exception:
-                pass
-
-        time.sleep(POLL_INTERVAL)
-
-    log.warning("Global timeout reached — skipping video.")
-    return False
-
-
-def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
-    """Navigate to the video URL and wait until playback finishes."""
-    log.info("Playing: %s  (%s)", video["title"], video["url"])
-
-    # autoplay=1 + start from beginning
-    url = video["url"] + "&autoplay=1&t=0"
-    driver.get(url)
-
-    # Give the page time to load
-    time.sleep(10)
-
-    # Dismiss consent dialogs
-    dismiss_consent(driver)
-
-    # Force play via JS in case autoplay was blocked
+def force_play(driver: webdriver.Chrome) -> None:
+    """Force the HTML5 video to play and unmute via JavaScript."""
     try:
-        driver.execute_script(
-            "var v = document.querySelector('video'); if(v) v.play();"
-        )
+        driver.execute_script("""
+            var v = document.querySelector('video');
+            if (v) {
+                v.muted = false;
+                v.volume = 0.5;
+                v.play().catch(function(){});
+            }
+        """)
     except Exception:
         pass
 
-    ended = wait_for_video_end(driver, video, log_file)
-    status = "played" if ended else "incomplete"
-    append_log(log_file, video, status)
+
+def get_current_time(driver: webdriver.Chrome) -> float:
+    """Return video.currentTime or -1 on error."""
+    try:
+        t = driver.execute_script(
+            "var v = document.querySelector('video'); return v ? v.currentTime : -1;"
+        )
+        return float(t) if t is not None else -1.0
+    except Exception:
+        return -1.0
+
+
+def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
+    """Navigate to the video and wait for it to finish by duration."""
+
+    # Get duration (use cached value from playlist if available)
+    duration = video.get("duration")
+    if not duration:
+        duration = get_video_duration(video["url"])
+    total_wait = duration + BUFFER_SECONDS
+    log.info(
+        "Playing: %s  (%s)  [duration=%ds, waiting=%ds]",
+        video["title"], video["url"], duration, total_wait,
+    )
+
+    url = video["url"] + "?autoplay=1&t=0"
+    driver.get(url)
+    time.sleep(8)
+
+    dismiss_consent(driver)
+    force_play(driver)
+
+    append_log(log_file, video, "started")
+
+    # Wait for the video duration, polling to log heartbeats and re-force play
+    start_time   = time.time()
+    last_hb      = start_time
+    last_ct      = get_current_time(driver)
+    stall_since  = start_time
+
+    while True:
+        elapsed = time.time() - start_time
+        if elapsed >= total_wait:
+            break
+
+        time.sleep(5)
+        now = time.time()
+
+        # Heartbeat log every HEARTBEAT_INTERVAL seconds
+        if now - last_hb >= HEARTBEAT_INTERVAL:
+            ct = get_current_time(driver)
+            log.info(
+                "  still playing: currentTime=%.1fs / expected=%.0fs (elapsed=%.0fs)",
+                ct, duration, elapsed,
+            )
+            last_hb = now
+
+            # Detect stall: if currentTime hasn't moved in 30s, force play again
+            if ct > 0 and abs(ct - last_ct) < 1.0:
+                log.warning("  video appears stalled — forcing play()")
+                force_play(driver)
+            elif ct > 0:
+                stall_since = now
+            last_ct = ct
+
+        # If currentTime is near the end, break early
+        ct = get_current_time(driver)
+        if 0 < ct >= duration - 2:
+            log.info("  currentTime=%.1fs reached end — finishing early.", ct)
+            time.sleep(3)
+            break
+
+    append_log(log_file, video, "played")
 
 
 # ---------------------------------------------------------------------------
@@ -244,13 +275,13 @@ def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="YouTube playlist kiosk tracker")
-    parser.add_argument("--playlist", required=True, help="YouTube playlist URL")
-    parser.add_argument("--log",      required=True, help="Path to the output log file")
-    parser.add_argument("--display",  default=":99",  help="X display (e.g. :99)")
+    parser.add_argument("--playlist", required=True)
+    parser.add_argument("--log",      required=True)
+    parser.add_argument("--display",  default=":99")
     args = parser.parse_args()
 
     iteration = 0
-    driver = None
+    driver    = None
 
     while True:
         iteration += 1
@@ -258,7 +289,7 @@ def main() -> None:
 
         videos = get_playlist_videos(args.playlist)
         if not videos:
-            log.error("No videos found. Retrying in 60 s...")
+            log.error("No videos found — retrying in 60s.")
             time.sleep(60)
             continue
 
@@ -289,7 +320,7 @@ def main() -> None:
                     time.sleep(30)
                 break
 
-        time.sleep(5)
+        time.sleep(3)
 
 
 if __name__ == "__main__":
