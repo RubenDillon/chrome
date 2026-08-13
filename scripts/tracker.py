@@ -117,11 +117,12 @@ def build_driver(display: str) -> uc.Chrome:
     options.add_argument("--disable-background-networking")
     options.add_argument("--disable-sync")
 
+    # headless=True makes uc add --headless=new which works in containers without display
     driver = uc.Chrome(
         options=options,
         driver_executable_path=uc_driver,
         version_main=None,  # auto-detect from installed Chrome
-        headless=False,     # must be False — uc needs non-headless to patch properly
+        headless=True,
     )
     return driver
 
