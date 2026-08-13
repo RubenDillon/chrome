@@ -118,28 +118,41 @@ def build_driver(display: str) -> webdriver.Chrome:
     os.environ["DISPLAY"] = display
 
     options = Options()
+    # ---- Sandbox / process model ----
     options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-namespace-sandbox")
+    options.add_argument("--single-process")
+    options.add_argument("--no-zygote")
+    # ---- GPU / graphics ----
+    # Force pure software rendering — no EGL/Vulkan/ANGLE needed
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-gpu-compositing")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--use-gl=swiftshader")
+    options.add_argument("--use-angle=swiftshader-webgl")
+    options.add_argument("--disable-vulkan")
+    options.add_argument("--disable-webgl")
+    options.add_argument("--disable-webgl2")
+    # ---- Memory / shared memory ----
+    options.add_argument("--disable-dev-shm-usage")
+    # ---- Autoplay / media ----
     options.add_argument("--autoplay-policy=no-user-gesture-required")
+    options.add_argument("--mute-audio")
+    # ---- UI ----
+    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
-    options.add_argument("--mute-audio")
-    options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--ignore-certificate-errors")
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    # Stability flags for containerised Chrome
-    options.add_argument("--disable-setuid-sandbox")
-    options.add_argument("--disable-namespace-sandbox")
-    options.add_argument("--single-process")          # avoids renderer subprocess crashes
-    options.add_argument("--no-zygote")               # avoids zygote fork issues in containers
+    # ---- Misc stability ----
     options.add_argument("--disable-crash-reporter")
     options.add_argument("--disable-background-networking")
     options.add_argument("--disable-client-side-phishing-detection")
     options.add_argument("--disable-sync")
-    # Exclude automation flags that trigger YouTube bot detection
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    # Exclude automation flags
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("prefs", {
@@ -147,14 +160,12 @@ def build_driver(display: str) -> webdriver.Chrome:
         "profile.password_manager_enabled": False,
     })
 
-    # ChromeDriver log for diagnostics
     service = Service(
         executable_path="/usr/local/bin/chromedriver",
         log_path="/tmp/chromedriver.log",
         service_args=["--verbose"],
     )
     driver = webdriver.Chrome(service=service, options=options)
-    # Hide webdriver flag from JS
     driver.execute_cdp_cmd(
         "Page.addScriptToEvaluateOnNewDocument",
         {"source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"},

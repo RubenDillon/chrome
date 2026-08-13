@@ -93,6 +93,11 @@ RUN mkdir -p /tmp/.X11-unix \
     && chmod 1777 /tmp/.X11-unix
 
 # -------------------------------------------------------
+# machine-id — Chrome requires a valid 32-char ID
+# -------------------------------------------------------
+RUN printf '%032x' "$(date +%s%N)" > /etc/machine-id
+
+# -------------------------------------------------------
 # Log directory (will be overridden by bind-mount)
 # -------------------------------------------------------
 RUN mkdir -p /var/log/chrome-kiosk \
