@@ -98,8 +98,8 @@ def build_driver(display: str) -> uc.Chrome:
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-setuid-sandbox")
     options.add_argument("--disable-namespace-sandbox")
-    options.add_argument("--single-process")
-    options.add_argument("--no-zygote")
+    # NOTE: do NOT use --single-process or --no-zygote with undetected-chromedriver
+    # uc requires Chrome's normal multi-process model to patch and start correctly
     # Software rendering for VM without GPU
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-gpu-compositing")
