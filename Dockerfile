@@ -54,6 +54,7 @@ RUN wget -q -O /tmp/google-chrome.rpm \
 # -------------------------------------------------------
 RUN pip3 install --no-cache-dir \
         selenium \
+        undetected-chromedriver \
         yt-dlp \
         requests
 
