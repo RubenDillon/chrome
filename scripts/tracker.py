@@ -206,22 +206,18 @@ def dismiss_consent(driver: webdriver.Chrome) -> None:
 
 
 def force_play(driver: webdriver.Chrome) -> None:
-    """Force the HTML5 video to play and unmute via JavaScript."""
+    """Force the HTML5 video element to play."""
     try:
         driver.execute_script("""
             var v = document.querySelector('video');
-            if (v) {
-                v.muted = false;
-                v.volume = 0.5;
-                v.play().catch(function(){});
-            }
+            if (v) { v.muted = false; v.volume = 0.8; v.play().catch(function(){}); }
         """)
     except Exception:
         pass
 
 
 def get_current_time(driver: webdriver.Chrome) -> float:
-    """Return video.currentTime or -1 on error."""
+    """Return video.currentTime, or -1 on error."""
     try:
         t = driver.execute_script(
             "var v = document.querySelector('video'); return v ? v.currentTime : -1;"
@@ -231,33 +227,90 @@ def get_current_time(driver: webdriver.Chrome) -> float:
         return -1.0
 
 
-def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
-    """Navigate to the video and wait for it to finish by duration."""
+def get_duration_from_page(driver: webdriver.Chrome) -> int:
+    """
+    Read video duration from the YouTube page DOM.
+    Tries multiple sources in order:
+      1. video.duration  (HTML5 element — most reliable when loaded)
+      2. ytInitialPlayerResponse.videoDetails.lengthSeconds  (page JS variable)
+      3. <meta itemprop="duration"> tag (ISO 8601 format PT#M#S)
+    Returns duration in seconds, or 0 if not found.
+    """
+    try:
+        # Source 1: HTML5 video element
+        d = driver.execute_script(
+            "var v = document.querySelector('video'); return (v && v.duration && !isNaN(v.duration)) ? v.duration : 0;"
+        )
+        if d and float(d) > 0:
+            return int(float(d))
+    except Exception:
+        pass
 
-    # Get duration (use cached value from playlist if available)
-    duration = video.get("duration")
-    if not duration:
-        duration = get_video_duration(video["url"])
-    total_wait = duration + BUFFER_SECONDS
-    log.info(
-        "Playing: %s  (%s)  [duration=%ds, waiting=%ds]",
-        video["title"], video["url"], duration, total_wait,
-    )
+    try:
+        # Source 2: YouTube's internal JS object (available even before video plays)
+        d = driver.execute_script("""
+            try {
+                return parseInt(ytInitialPlayerResponse.videoDetails.lengthSeconds, 10);
+            } catch(e) { return 0; }
+        """)
+        if d and int(d) > 0:
+            return int(d)
+    except Exception:
+        pass
+
+    try:
+        # Source 3: <meta itemprop="duration" content="PT4M13S">
+        content = driver.execute_script("""
+            var m = document.querySelector('meta[itemprop="duration"]');
+            return m ? m.getAttribute('content') : '';
+        """)
+        if content:
+            import re
+            m = re.match(r'PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?', content)
+            if m:
+                h = int(m.group(1) or 0)
+                mi = int(m.group(2) or 0)
+                s = int(m.group(3) or 0)
+                total = h * 3600 + mi * 60 + s
+                if total > 0:
+                    return total
+    except Exception:
+        pass
+
+    return 0
+
+
+def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
+    """Navigate to the YouTube video page and wait for it to finish."""
 
     url = video["url"] + "?autoplay=1&t=0"
     driver.get(url)
-    time.sleep(8)
+    time.sleep(10)
 
     dismiss_consent(driver)
     force_play(driver)
+    time.sleep(3)
+
+    # Get duration from page (much more reliable than yt-dlp for individual videos)
+    duration = get_duration_from_page(driver)
+    if duration > 0:
+        log.info("Duration from page: %ds", duration)
+    else:
+        duration = FALLBACK_DURATION
+        log.warning("Could not read duration from page — using %ds fallback.", duration)
+
+    total_wait = duration + BUFFER_SECONDS
+    log.info(
+        "Playing: %s  [duration=%ds wait=%ds]",
+        video["title"], duration, total_wait,
+    )
 
     append_log(log_file, video, "started")
 
-    # Wait for the video duration, polling to log heartbeats and re-force play
-    start_time   = time.time()
-    last_hb      = start_time
-    last_ct      = get_current_time(driver)
-    stall_since  = start_time
+    start_time = time.time()
+    last_hb    = start_time
+    last_ct    = get_current_time(driver)
+    last_moved = start_time
 
     while True:
         elapsed = time.time() - start_time
@@ -266,26 +319,29 @@ def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
 
         time.sleep(5)
         now = time.time()
+        ct  = get_current_time(driver)
 
-        # Heartbeat log every HEARTBEAT_INTERVAL seconds
+        # Heartbeat every HEARTBEAT_INTERVAL seconds
         if now - last_hb >= HEARTBEAT_INTERVAL:
-            ct = get_current_time(driver)
             log.info(
-                "  still playing: currentTime=%.1fs / expected=%.0fs (elapsed=%.0fs)",
+                "  playing: currentTime=%.1fs / duration=%ds (elapsed=%.0fs)",
                 ct, duration, elapsed,
             )
             last_hb = now
+            # Re-force play in case YouTube paused it
+            force_play(driver)
 
-            # Detect stall: if currentTime hasn't moved in 30s, force play again
-            if ct > 0 and abs(ct - last_ct) < 1.0:
-                log.warning("  video appears stalled — forcing play()")
-                force_play(driver)
-            elif ct > 0:
-                stall_since = now
-            last_ct = ct
+        # Track whether currentTime is advancing
+        if ct > 0 and abs(ct - last_ct) > 0.5:
+            last_moved = now
+        last_ct = ct
 
-        # If currentTime is near the end, break early
-        ct = get_current_time(driver)
+        # If video appears stuck for >60s after it started, skip it
+        if ct > 3 and (now - last_moved) > 60:
+            log.warning("  video stalled at %.1fs — skipping.", ct)
+            break
+
+        # Early exit when near end
         if 0 < ct >= duration - 2:
             log.info("  currentTime=%.1fs reached end — finishing early.", ct)
             time.sleep(3)
