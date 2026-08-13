@@ -130,6 +130,15 @@ def build_driver(display: str) -> webdriver.Chrome:
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--ignore-certificate-errors")
     options.add_argument("--disable-blink-features=AutomationControlled")
+    # Stability flags for containerised Chrome
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--disable-namespace-sandbox")
+    options.add_argument("--single-process")          # avoids renderer subprocess crashes
+    options.add_argument("--no-zygote")               # avoids zygote fork issues in containers
+    options.add_argument("--disable-crash-reporter")
+    options.add_argument("--disable-background-networking")
+    options.add_argument("--disable-client-side-phishing-detection")
+    options.add_argument("--disable-sync")
     # Exclude automation flags that trigger YouTube bot detection
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
@@ -138,7 +147,12 @@ def build_driver(display: str) -> webdriver.Chrome:
         "profile.password_manager_enabled": False,
     })
 
-    service = Service(executable_path="/usr/local/bin/chromedriver")
+    # ChromeDriver log for diagnostics
+    service = Service(
+        executable_path="/usr/local/bin/chromedriver",
+        log_path="/tmp/chromedriver.log",
+        service_args=["--verbose"],
+    )
     driver = webdriver.Chrome(service=service, options=options)
     # Hide webdriver flag from JS
     driver.execute_cdp_cmd(
