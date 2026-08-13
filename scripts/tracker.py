@@ -82,10 +82,17 @@ def get_playlist_videos(playlist_url: str) -> list:
 def build_driver(display: str) -> uc.Chrome:
     """
     Build a Chrome driver using undetected-chromedriver.
-    uc patches ChromeDriver at runtime to remove WebDriver fingerprints,
-    so YouTube loads the player normally instead of blocking it.
+    uc patches the ChromeDriver binary at runtime to remove WebDriver fingerprints.
+    It needs a writable copy of chromedriver — we keep it in /tmp.
     """
     os.environ["DISPLAY"] = display
+
+    # uc needs to write-patch the binary; copy to a writable location once
+    import shutil
+    uc_driver = "/tmp/chromedriver_uc"
+    if not os.path.exists(uc_driver):
+        shutil.copy2("/usr/local/bin/chromedriver", uc_driver)
+        os.chmod(uc_driver, 0o755)
 
     options = uc.ChromeOptions()
     options.add_argument("--no-sandbox")
@@ -112,7 +119,7 @@ def build_driver(display: str) -> uc.Chrome:
 
     driver = uc.Chrome(
         options=options,
-        driver_executable_path="/usr/local/bin/chromedriver",
+        driver_executable_path=uc_driver,
         version_main=None,  # auto-detect from installed Chrome
         headless=False,     # must be False — uc needs non-headless to patch properly
     )
