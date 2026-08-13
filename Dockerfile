@@ -60,52 +60,30 @@ RUN pip3 install --no-cache-dir \
 # -------------------------------------------------------
 # Install ChromeDriver matching installed Chrome version
 # -------------------------------------------------------
-RUN python3 - <<'PYEOF'
-import subprocess, urllib.request, json, sys, os, zipfile, io
-
-# Get Chrome major version
-out = subprocess.check_output(["google-chrome", "--version"], stderr=subprocess.DEVNULL).decode()
-major = out.strip().split()[-1].split(".")[0]
-print(f"Chrome major version: {major}")
-
-# Fetch known-good versions JSON
-url = "https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json"
+RUN CHROME_MAJOR=$(google-chrome --version 2>/dev/null | grep -oP '\d+' | head -1) \
+    && echo "Chrome major: ${CHROME_MAJOR}" \
+    && DRIVER_URL=$(CHROME_MAJOR="${CHROME_MAJOR}" python3 -c "
+import sys, json, os, urllib.request
+major = os.environ['CHROME_MAJOR']
+url = 'https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json'
 with urllib.request.urlopen(url) as r:
     data = json.load(r)
-
-# Find latest chromedriver for this major version
-versions = [v for v in data["versions"] if v["version"].split(".")[0] == major]
-versions.sort(key=lambda x: list(map(int, x["version"].split("."))), reverse=True)
-
-driver_url = None
+versions = [v for v in data['versions'] if v['version'].split('.')[0] == major]
+versions.sort(key=lambda x: list(map(int, x['version'].split('.'))), reverse=True)
 for v in versions:
-    for dl in v["downloads"].get("chromedriver", []):
-        if dl["platform"] == "linux64":
-            driver_url = dl["url"]
-            break
-    if driver_url:
-        break
-
-if not driver_url:
-    print(f"ERROR: no chromedriver found for Chrome {major}", file=sys.stderr)
-    sys.exit(1)
-
-print(f"Downloading chromedriver from: {driver_url}")
-with urllib.request.urlopen(driver_url) as r:
-    zdata = r.read()
-
-with zipfile.ZipFile(io.BytesIO(zdata)) as z:
-    for name in z.namelist():
-        if name.endswith("chromedriver") and not name.endswith("/"):
-            data_bytes = z.read(name)
-            out_path = "/usr/local/bin/chromedriver"
-            with open(out_path, "wb") as f:
-                f.write(data_bytes)
-            os.chmod(out_path, 0o755)
-            print(f"Installed chromedriver to {out_path}")
-            break
-PYEOF
-RUN chromedriver --version
+    for dl in v['downloads'].get('chromedriver', []):
+        if dl['platform'] == 'linux64':
+            print(dl['url'])
+            sys.exit(0)
+sys.exit(1)
+") \
+    && echo "ChromeDriver URL: ${DRIVER_URL}" \
+    && curl -sL "${DRIVER_URL}" -o /tmp/chromedriver.zip \
+    && unzip -p /tmp/chromedriver.zip "chromedriver-linux64/chromedriver" \
+         > /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -f /tmp/chromedriver.zip \
+    && chromedriver --version
 
 # -------------------------------------------------------
 # Create non-root user for Chrome
