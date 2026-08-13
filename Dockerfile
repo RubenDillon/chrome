@@ -60,29 +60,16 @@ RUN pip3 install --no-cache-dir \
 # -------------------------------------------------------
 # Install ChromeDriver matching installed Chrome version
 # -------------------------------------------------------
+COPY scripts/get_chromedriver.py /tmp/get_chromedriver.py
 RUN CHROME_MAJOR=$(google-chrome --version 2>/dev/null | grep -oP '\d+' | head -1) \
     && echo "Chrome major: ${CHROME_MAJOR}" \
-    && DRIVER_URL=$(CHROME_MAJOR="${CHROME_MAJOR}" python3 -c "
-import sys, json, os, urllib.request
-major = os.environ['CHROME_MAJOR']
-url = 'https://googlechromelabs.github.io/chrome-for-testing/known-good-versions-with-downloads.json'
-with urllib.request.urlopen(url) as r:
-    data = json.load(r)
-versions = [v for v in data['versions'] if v['version'].split('.')[0] == major]
-versions.sort(key=lambda x: list(map(int, x['version'].split('.'))), reverse=True)
-for v in versions:
-    for dl in v['downloads'].get('chromedriver', []):
-        if dl['platform'] == 'linux64':
-            print(dl['url'])
-            sys.exit(0)
-sys.exit(1)
-") \
+    && DRIVER_URL=$(CHROME_MAJOR="${CHROME_MAJOR}" python3 /tmp/get_chromedriver.py) \
     && echo "ChromeDriver URL: ${DRIVER_URL}" \
     && curl -sL "${DRIVER_URL}" -o /tmp/chromedriver.zip \
-    && unzip -p /tmp/chromedriver.zip "chromedriver-linux64/chromedriver" \
+    && unzip -p /tmp/chromedriver.zip chromedriver-linux64/chromedriver \
          > /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm -f /tmp/chromedriver.zip \
+    && rm -f /tmp/chromedriver.zip /tmp/get_chromedriver.py \
     && chromedriver --version
 
 # -------------------------------------------------------
