@@ -4,8 +4,9 @@ tracker.py
 ==========
 1. Fetches the YouTube playlist video list with yt-dlp.
 2. Opens each video in Chrome (kiosk mode via Selenium) and waits for it to finish.
-3. After each video completes, writes a timestamped entry to the log file.
-4. Loops the playlist indefinitely.
+3. Writes a timestamped STARTED entry when playback begins.
+4. Writes a timestamped PLAYED/INCOMPLETE entry when playback ends.
+5. Loops the playlist indefinitely.
 
 Usage (called by entrypoint.sh):
     python3 tracker.py --playlist <url> --log <path> --display <:N>
@@ -23,8 +24,6 @@ from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -42,7 +41,7 @@ log = logging.getLogger(__name__)
 # Helpers
 # ---------------------------------------------------------------------------
 
-def get_playlist_videos(playlist_url: str) -> list[dict]:
+def get_playlist_videos(playlist_url: str) -> list:
     """Return ordered list of {id, url, title} dicts for every video in the playlist."""
     log.info("Fetching playlist: %s", playlist_url)
     result = subprocess.run(
@@ -78,12 +77,10 @@ def get_playlist_videos(playlist_url: str) -> list[dict]:
 
 
 def build_driver(display: str) -> webdriver.Chrome:
-    """Create a headless-looking Chrome driver running on the given Xvfb display."""
+    """Create a Chrome driver running on the given Xvfb display."""
     os.environ["DISPLAY"] = display
 
     options = Options()
-
-    # Kiosk + autoplay
     options.add_argument("--kiosk")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
@@ -91,15 +88,14 @@ def build_driver(display: str) -> webdriver.Chrome:
     options.add_argument("--autoplay-policy=no-user-gesture-required")
     options.add_argument("--disable-infobars")
     options.add_argument("--disable-extensions")
-    options.add_argument("--mute-audio")                 # no sound in headless VM
+    options.add_argument("--mute-audio")
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--start-fullscreen")
     options.add_argument("--disable-notifications")
     options.add_argument("--disable-popup-blocking")
     options.add_argument("--ignore-certificate-errors")
-    options.add_argument(f"--display={display}")
+    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    # Disable password / save prompts
     prefs = {
         "credentials_enable_service": False,
         "profile.password_manager_enabled": False,
@@ -111,77 +107,133 @@ def build_driver(display: str) -> webdriver.Chrome:
     return driver
 
 
-def wait_for_video_end(driver: webdriver.Chrome, timeout_seconds: int = 3600) -> bool:
-    """
-    Poll the page's HTML5 video element until it reports ended=true or an error.
-    Returns True when ended normally, False on timeout.
-    """
-    js_ended = """
-    var vids = document.querySelectorAll('video');
-    if (vids.length === 0) return 'no_video';
-    var v = vids[0];
-    if (v.error) return 'error';
-    if (v.ended)  return 'ended';
-    return 'playing';
-    """
-    deadline = time.time() + timeout_seconds
-    while time.time() < deadline:
-        try:
-            status = driver.execute_script(js_ended)
-        except Exception:
-            return False
-
-        if status == "ended":
-            return True
-        if status == "error":
-            log.warning("Video element reported an error — skipping.")
-            return False
-
-        time.sleep(5)
-
-    log.warning("Timeout waiting for video to end.")
-    return False
-
-
 def append_log(log_file: str, video: dict, status: str) -> None:
-    """Append a line to the played log."""
+    """Append a timestamped line to the played log."""
     timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     line = f"[{timestamp}] {status.upper()} | {video['url']} | {video['title']}\n"
     try:
         with open(log_file, "a", encoding="utf-8") as fh:
             fh.write(line)
+            fh.flush()
         log.info("Logged: %s", line.strip())
     except OSError as exc:
         log.error("Cannot write to log file %s: %s", log_file, exc)
+
+
+def dismiss_consent(driver: webdriver.Chrome) -> None:
+    """Best-effort dismiss of YouTube cookie/consent dialogs."""
+    selectors = [
+        '//button[contains(., "Accept all")]',
+        '//button[contains(., "Accept")]',
+        '//button[contains(., "Agree")]',
+        '//button[@aria-label="Accept all"]',
+    ]
+    for sel in selectors:
+        try:
+            btn = driver.find_element(By.XPATH, sel)
+            btn.click()
+            log.info("Dismissed consent dialog.")
+            time.sleep(2)
+            return
+        except Exception:
+            pass
+
+
+def wait_for_video_end(driver: webdriver.Chrome, video: dict, log_file: str) -> bool:
+    """
+    Poll the HTML5 video element until:
+      - ended=true  → return True
+      - error       → return False
+      - no_video for more than NO_VIDEO_TIMEOUT → log INCOMPLETE and return False
+      - global timeout (video length + buffer) → log INCOMPLETE and return False
+
+    Also logs a STARTED entry on first confirmed playback.
+    """
+    NO_VIDEO_TIMEOUT = 60       # seconds to wait for <video> to appear
+    GLOBAL_TIMEOUT   = 4 * 3600 # 4 hours max per video (covers long streams)
+    POLL_INTERVAL    = 5
+
+    js = """
+    var vids = document.querySelectorAll('video');
+    if (vids.length === 0) return 'no_video';
+    var v = vids[0];
+    if (v.error)  return 'error';
+    if (v.ended)  return 'ended';
+    if (v.paused) return 'paused';
+    if (v.currentTime > 0) return 'playing';
+    return 'loading';
+    """
+
+    started_logged = False
+    no_video_since = time.time()
+    deadline = time.time() + GLOBAL_TIMEOUT
+
+    while time.time() < deadline:
+        try:
+            status = driver.execute_script(js)
+        except Exception as exc:
+            log.warning("JS execution error: %s", exc)
+            return False
+
+        log.debug("Video status: %s", status)
+
+        if status == "no_video":
+            if time.time() - no_video_since > NO_VIDEO_TIMEOUT:
+                log.warning("No <video> element found after %ds — skipping.", NO_VIDEO_TIMEOUT)
+                return False
+        else:
+            # Reset the no_video timer whenever we see any video element
+            no_video_since = time.time()
+
+        if status in ("playing", "loading", "paused") and not started_logged:
+            append_log(log_file, video, "started")
+            started_logged = True
+
+        if status == "ended":
+            return True
+
+        if status == "error":
+            log.warning("Video element reported an error — skipping.")
+            return False
+
+        # If paused for too long, try to resume
+        if status == "paused" and started_logged:
+            try:
+                driver.execute_script(
+                    "document.querySelector('video').play();"
+                )
+            except Exception:
+                pass
+
+        time.sleep(POLL_INTERVAL)
+
+    log.warning("Global timeout reached — skipping video.")
+    return False
 
 
 def play_video(driver: webdriver.Chrome, video: dict, log_file: str) -> None:
     """Navigate to the video URL and wait until playback finishes."""
     log.info("Playing: %s  (%s)", video["title"], video["url"])
 
-    # Append autoplay param so YouTube starts automatically
-    url = video["url"] + "&autoplay=1"
+    # autoplay=1 + start from beginning
+    url = video["url"] + "&autoplay=1&t=0"
     driver.get(url)
 
-    # Give the page time to load and start playing
-    time.sleep(8)
+    # Give the page time to load
+    time.sleep(10)
 
-    # Attempt to dismiss cookie/consent dialogs (best-effort)
+    # Dismiss consent dialogs
+    dismiss_consent(driver)
+
+    # Force play via JS in case autoplay was blocked
     try:
-        btn = driver.find_element(By.XPATH, '//button[contains(., "Accept")]')
-        btn.click()
-        time.sleep(2)
+        driver.execute_script(
+            "var v = document.querySelector('video'); if(v) v.play();"
+        )
     except Exception:
         pass
 
-    # Click the video player to ensure it starts (YouTube sometimes needs it)
-    try:
-        player = driver.find_element(By.CSS_SELECTOR, "video")
-        driver.execute_script("arguments[0].play();", player)
-    except Exception:
-        pass
-
-    ended = wait_for_video_end(driver)
+    ended = wait_for_video_end(driver, video, log_file)
     status = "played" if ended else "incomplete"
     append_log(log_file, video, status)
 
@@ -194,7 +246,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="YouTube playlist kiosk tracker")
     parser.add_argument("--playlist", required=True, help="YouTube playlist URL")
     parser.add_argument("--log",      required=True, help="Path to the output log file")
-    parser.add_argument("--display",  default=":99",  help="X display to use (e.g. :99)")
+    parser.add_argument("--display",  default=":99",  help="X display (e.g. :99)")
     args = parser.parse_args()
 
     iteration = 0
@@ -224,7 +276,6 @@ def main() -> None:
                 play_video(driver, video, args.log)
             except Exception as exc:
                 log.error("Error playing %s: %s", video["url"], exc)
-                # Try to recover by restarting the driver
                 try:
                     driver.quit()
                 except Exception:
@@ -238,7 +289,6 @@ def main() -> None:
                     time.sleep(30)
                 break
 
-        # Small pause between playlist loops
         time.sleep(5)
 
 

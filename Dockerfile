@@ -87,6 +87,12 @@ RUN chmod +x /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/tracker.py
 
 # -------------------------------------------------------
+# X11 socket directory — must exist before Xvfb runs as non-root
+# -------------------------------------------------------
+RUN mkdir -p /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
+
+# -------------------------------------------------------
 # Log directory (will be overridden by bind-mount)
 # -------------------------------------------------------
 RUN mkdir -p /var/log/chrome-kiosk \
