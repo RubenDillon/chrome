@@ -128,17 +128,14 @@ def build_driver(display: str) -> webdriver.Chrome:
     # Force pure software rendering — no EGL/Vulkan/ANGLE needed
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-gpu-compositing")
-    options.add_argument("--disable-software-rasterizer")
     options.add_argument("--use-gl=swiftshader")
     options.add_argument("--use-angle=swiftshader-webgl")
     options.add_argument("--disable-vulkan")
-    options.add_argument("--disable-webgl")
-    options.add_argument("--disable-webgl2")
     # ---- Memory / shared memory ----
     options.add_argument("--disable-dev-shm-usage")
     # ---- Autoplay / media ----
+    # NOTE: do NOT use --mute-audio — YouTube detects it and refuses to load the player
     options.add_argument("--autoplay-policy=no-user-gesture-required")
-    options.add_argument("--mute-audio")
     # ---- UI ----
     options.add_argument("--window-size=1920,1080")
     options.add_argument("--disable-infobars")
@@ -152,7 +149,7 @@ def build_driver(display: str) -> webdriver.Chrome:
     options.add_argument("--disable-client-side-phishing-detection")
     options.add_argument("--disable-sync")
     options.add_argument("--disable-blink-features=AutomationControlled")
-    # Exclude automation flags
+    # Exclude automation flags that trigger YouTube bot detection
     options.add_experimental_option("excludeSwitches", ["enable-automation"])
     options.add_experimental_option("useAutomationExtension", False)
     options.add_experimental_option("prefs", {
@@ -206,11 +203,15 @@ def dismiss_consent(driver: webdriver.Chrome) -> None:
 
 
 def force_play(driver: webdriver.Chrome) -> None:
-    """Force the HTML5 video element to play."""
+    """Force the HTML5 video element to play (muted via JS, not via Chrome flag)."""
     try:
         driver.execute_script("""
             var v = document.querySelector('video');
-            if (v) { v.muted = false; v.volume = 0.8; v.play().catch(function(){}); }
+            if (v) {
+                v.muted = true;
+                v.volume = 0;
+                v.play().catch(function(){});
+            }
         """)
     except Exception:
         pass
