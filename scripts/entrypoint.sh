@@ -27,11 +27,6 @@ sleep 2
 
 export DISPLAY="${DISPLAY_NUM}"
 
-# Start D-Bus session (some Chrome features need it)
-if command -v dbus-daemon &>/dev/null; then
-    eval "$(dbus-launch --sh-syntax)" 2>/dev/null || true
-fi
-
 echo "[entrypoint] Xvfb running (PID ${XVFB_PID}), launching tracker..." | tee -a "$LOG_FILE"
 
 # Launch Python tracker — this is the main process
