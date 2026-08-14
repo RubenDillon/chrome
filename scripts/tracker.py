@@ -117,23 +117,10 @@ def build_driver(display: str) -> uc.Chrome:
     options.add_argument("--disable-background-networking")
     options.add_argument("--disable-sync")
 
-    # headless=True makes uc add --headless=new which works in containers without display
-    # version_main must match installed Chrome — auto-detect fails in some containers
-    chrome_ver = None
-    try:
-        import subprocess
-        out = subprocess.check_output(
-            ["google-chrome", "--version"], stderr=subprocess.DEVNULL
-        ).decode()
-        chrome_ver = int(out.strip().split()[-1].split(".")[0])
-        log.info("Detected Chrome version: %d", chrome_ver)
-    except Exception:
-        log.warning("Could not detect Chrome version — uc will guess")
-
     driver = uc.Chrome(
         options=options,
         driver_executable_path=uc_driver,
-        version_main=chrome_ver,
+        version_main=None,
         headless=True,
     )
     return driver
