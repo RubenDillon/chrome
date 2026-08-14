@@ -4,7 +4,8 @@ LABEL maintainer="RubenDillon"
 LABEL description="Chrome kiosk container - YouTube playlist continuous playback"
 
 # -------------------------------------------------------
-# System packages
+# System packages required by Playwright's Chromium
+# (equivalent to what playwright install-deps installs on Ubuntu)
 # -------------------------------------------------------
 RUN dnf install -y epel-release \
     && dnf install -y --allowerasing \
@@ -18,7 +19,10 @@ RUN dnf install -y epel-release \
         ca-certificates \
         fontconfig \
         nss \
+        nss-util \
+        nspr \
         atk \
+        at-spi2-atk \
         cups-libs \
         gtk3 \
         libXcomposite \
@@ -28,29 +32,35 @@ RUN dnf install -y epel-release \
         libXi \
         libXrandr \
         libXtst \
+        libXScrnSaver \
         pango \
         alsa-lib \
         liberation-fonts \
         freetype \
+        harfbuzz \
         dbus-glib \
+        dbus-libs \
+        mesa-libgbm \
+        libdrm \
+        libxkbcommon \
     && dnf clean all
 
 # -------------------------------------------------------
 # Python dependencies
-# Playwright manages its own browser binaries — no separate Chrome install needed
 # -------------------------------------------------------
 RUN pip3 install --no-cache-dir \
         playwright \
         yt-dlp
 
 # -------------------------------------------------------
-# Install Playwright's bundled Chromium + its system dependencies
+# Download Playwright's Chromium browser
+# Run as root so it goes to /root/.cache, then we'll make it world-readable
 # -------------------------------------------------------
 RUN playwright install chromium \
-    && playwright install-deps chromium
+    && chmod -R a+rX /root/.cache/ms-playwright
 
 # -------------------------------------------------------
-# machine-id — required by some system libs
+# machine-id
 # -------------------------------------------------------
 RUN printf '%032x' "$(date +%s%N)" > /etc/machine-id
 
@@ -60,10 +70,11 @@ RUN printf '%032x' "$(date +%s%N)" > /etc/machine-id
 RUN useradd -m -s /bin/bash kiosk
 
 # -------------------------------------------------------
-# X11 socket directory (kept for Xvfb fallback if needed)
+# Make Playwright cache accessible to kiosk user
 # -------------------------------------------------------
-RUN mkdir -p /tmp/.X11-unix \
-    && chmod 1777 /tmp/.X11-unix
+RUN mkdir -p /home/kiosk/.cache \
+    && cp -r /root/.cache/ms-playwright /home/kiosk/.cache/ms-playwright \
+    && chown -R kiosk:kiosk /home/kiosk/.cache
 
 # -------------------------------------------------------
 # Log directory (overridden by bind-mount at runtime)
