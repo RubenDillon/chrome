@@ -70,16 +70,17 @@ def get_playlist_videos(playlist_url: str) -> list:
 # ---------------------------------------------------------------------------
 
 def build_browser(playwright) -> Browser:
-    """Launch Playwright Chromium — no WebDriver signals, passes YouTube checks."""
+    """
+    Launch Playwright's bundled Chromium headless-shell.
+    This build has no WebDriver signals and no GPU dependency —
+    it uses its own internal software renderer.
+    """
     return playwright.chromium.launch(
         headless=True,
         args=[
             "--no-sandbox",
             "--disable-setuid-sandbox",
             "--disable-dev-shm-usage",
-            "--disable-gpu",
-            "--use-gl=swiftshader",
-            "--disable-vulkan",
             "--autoplay-policy=no-user-gesture-required",
             "--no-first-run",
             "--no-default-browser-check",
