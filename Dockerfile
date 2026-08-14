@@ -41,13 +41,14 @@ RUN dnf install -y epel-release \
     && dnf clean all
 
 # -------------------------------------------------------
-# Install Google Chrome (stable)
+# Install Google Chrome 120 (last version fully supported by uc 3.5.5)
 # -------------------------------------------------------
-RUN wget -q -O /tmp/google-chrome.rpm \
-        https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
+RUN CHROME_URL="https://dl.google.com/linux/chrome/rpm/stable/x86_64/google-chrome-stable-120.0.6099.224-1.x86_64.rpm" \
+    && wget -q -O /tmp/google-chrome.rpm "${CHROME_URL}" \
     && dnf install -y /tmp/google-chrome.rpm \
     && rm -f /tmp/google-chrome.rpm \
-    && dnf clean all
+    && dnf clean all \
+    && google-chrome --version
 
 # -------------------------------------------------------
 # Install Python dependencies for video tracker
@@ -59,18 +60,14 @@ RUN pip3 install --no-cache-dir \
         requests
 
 # -------------------------------------------------------
-# Install ChromeDriver matching installed Chrome version
+# Install ChromeDriver 120 matching Chrome 120
 # -------------------------------------------------------
-COPY scripts/get_chromedriver.py /tmp/get_chromedriver.py
-RUN CHROME_MAJOR=$(google-chrome --version 2>/dev/null | grep -oP '\d+' | head -1) \
-    && echo "Chrome major: ${CHROME_MAJOR}" \
-    && DRIVER_URL=$(CHROME_MAJOR="${CHROME_MAJOR}" python3 /tmp/get_chromedriver.py) \
-    && echo "ChromeDriver URL: ${DRIVER_URL}" \
+RUN DRIVER_URL="https://storage.googleapis.com/chrome-for-testing-public/120.0.6099.224/linux64/chromedriver-linux64.zip" \
     && curl -sL "${DRIVER_URL}" -o /tmp/chromedriver.zip \
     && unzip -p /tmp/chromedriver.zip chromedriver-linux64/chromedriver \
          > /usr/local/bin/chromedriver \
     && chmod +x /usr/local/bin/chromedriver \
-    && rm -f /tmp/chromedriver.zip /tmp/get_chromedriver.py \
+    && rm -f /tmp/chromedriver.zip \
     && chromedriver --version
 
 # -------------------------------------------------------
