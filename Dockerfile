@@ -4,14 +4,10 @@ LABEL maintainer="RubenDillon"
 LABEL description="Chrome kiosk container - YouTube playlist continuous playback"
 
 # -------------------------------------------------------
-# Install EPEL + required packages
-# AlmaLinux 9 has full X11/desktop repos without subscription
+# System packages
 # -------------------------------------------------------
 RUN dnf install -y epel-release \
     && dnf install -y --allowerasing \
-        xorg-x11-server-Xvfb \
-        xorg-x11-utils \
-        xdotool \
         python3 \
         python3-pip \
         wget \
@@ -19,11 +15,9 @@ RUN dnf install -y epel-release \
         unzip \
         jq \
         procps-ng \
-        dbus-glib \
-        dbus-daemon \
-        liberation-fonts \
+        ca-certificates \
+        fontconfig \
         nss \
-        alsa-lib \
         atk \
         cups-libs \
         gtk3 \
@@ -35,50 +29,47 @@ RUN dnf install -y epel-release \
         libXrandr \
         libXtst \
         pango \
-        ca-certificates \
-        fontconfig \
+        alsa-lib \
+        liberation-fonts \
         freetype \
+        dbus-glib \
     && dnf clean all
 
 # -------------------------------------------------------
-# Install Google Chrome stable (current) + matching ChromeDriver
-# We use uc with headless=True which works with any Chrome version
-# -------------------------------------------------------
-RUN wget -q -O /tmp/google-chrome.rpm \
-        https://dl.google.com/linux/direct/google-chrome-stable_current_x86_64.rpm \
-    && dnf install -y /tmp/google-chrome.rpm \
-    && rm -f /tmp/google-chrome.rpm \
-    && dnf clean all \
-    && google-chrome --version
-
-# -------------------------------------------------------
-# Install Python dependencies for video tracker
+# Python dependencies
+# Playwright manages its own browser binaries — no separate Chrome install needed
 # -------------------------------------------------------
 RUN pip3 install --no-cache-dir \
-        selenium \
-        undetected-chromedriver \
-        yt-dlp \
-        requests
+        playwright \
+        yt-dlp
 
 # -------------------------------------------------------
-# Install ChromeDriver matching installed Chrome version
+# Install Playwright's bundled Chromium + its system dependencies
 # -------------------------------------------------------
-COPY scripts/get_chromedriver.py /tmp/get_chromedriver.py
-RUN CHROME_MAJOR=$(google-chrome --version 2>/dev/null | grep -oP '\d+' | head -1) \
-    && echo "Chrome major: ${CHROME_MAJOR}" \
-    && DRIVER_URL=$(CHROME_MAJOR="${CHROME_MAJOR}" python3 /tmp/get_chromedriver.py) \
-    && echo "ChromeDriver URL: ${DRIVER_URL}" \
-    && curl -sL "${DRIVER_URL}" -o /tmp/chromedriver.zip \
-    && unzip -p /tmp/chromedriver.zip chromedriver-linux64/chromedriver \
-         > /usr/local/bin/chromedriver \
-    && chmod +x /usr/local/bin/chromedriver \
-    && rm -f /tmp/chromedriver.zip /tmp/get_chromedriver.py \
-    && chromedriver --version
+RUN playwright install chromium \
+    && playwright install-deps chromium
 
 # -------------------------------------------------------
-# Create non-root user for Chrome
+# machine-id — required by some system libs
+# -------------------------------------------------------
+RUN printf '%032x' "$(date +%s%N)" > /etc/machine-id
+
+# -------------------------------------------------------
+# Create non-root user
 # -------------------------------------------------------
 RUN useradd -m -s /bin/bash kiosk
+
+# -------------------------------------------------------
+# X11 socket directory (kept for Xvfb fallback if needed)
+# -------------------------------------------------------
+RUN mkdir -p /tmp/.X11-unix \
+    && chmod 1777 /tmp/.X11-unix
+
+# -------------------------------------------------------
+# Log directory (overridden by bind-mount at runtime)
+# -------------------------------------------------------
+RUN mkdir -p /var/log/chrome-kiosk \
+    && chown kiosk:kiosk /var/log/chrome-kiosk
 
 # -------------------------------------------------------
 # Copy application scripts
@@ -88,23 +79,6 @@ COPY scripts/tracker.py    /usr/local/bin/tracker.py
 
 RUN chmod +x /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/tracker.py
-
-# -------------------------------------------------------
-# X11 socket directory — must exist before Xvfb runs as non-root
-# -------------------------------------------------------
-RUN mkdir -p /tmp/.X11-unix \
-    && chmod 1777 /tmp/.X11-unix
-
-# -------------------------------------------------------
-# machine-id — Chrome requires a valid 32-char ID
-# -------------------------------------------------------
-RUN printf '%032x' "$(date +%s%N)" > /etc/machine-id
-
-# -------------------------------------------------------
-# Log directory (will be overridden by bind-mount)
-# -------------------------------------------------------
-RUN mkdir -p /var/log/chrome-kiosk \
-    && chown kiosk:kiosk /var/log/chrome-kiosk
 
 USER kiosk
 WORKDIR /home/kiosk
